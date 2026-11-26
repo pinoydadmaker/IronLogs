@@ -586,7 +586,10 @@
         if (!chosen) return;
         document.getElementById('workoutTitle').value = chosen.title;
         document.getElementById('workoutDate').value = todayISO();
-        sessionExercises = [createBlankExercise('', chosen.muscle)];
+        const isSingleBlank = sessionExercises.length === 1 && !sessionExercises[0].name.trim() && sessionExercises[0].sets.every((s) => !s.weight && !s.reps);
+        if (isSingleBlank) {
+          sessionExercises = [createBlankExercise('', chosen.muscle)];
+        }
         renderSession();
         showToast(`Set workout type: ${chosen.title}`);
       }
@@ -1451,16 +1454,16 @@
         form.classList.toggle('flex');
       });
 
-      document.getElementById('saveNewGoalBtn').addEventListener('click', () => {
+      function submitNewGoal() {
         const nameEl = document.getElementById('newGoalName');
         const targetEl = document.getElementById('newGoalTarget');
         const name = nameEl.value.trim();
-        const target = parseInt(targetEl.value, 10) || 100;
+        const target = Math.max(1, parseInt(targetEl.value, 10) || 100);
         if (!name) {
           showToast('Enter an exercise name for the daily goal.', true);
           return;
         }
-        dailyGoals.push({ id: 'goal_' + uid(), name, target: Math.max(1, target) });
+        dailyGoals.push({ id: 'goal_' + uid(), name, target });
         saveStorage();
         nameEl.value = '';
         targetEl.value = '';
@@ -1468,6 +1471,16 @@
         document.getElementById('addGoalForm').classList.remove('flex');
         renderDailyGoals();
         showToast(`Added daily goal: ${name} (${target}/day)`);
+      }
+
+      document.getElementById('saveNewGoalBtn').addEventListener('click', submitNewGoal);
+      ['newGoalName', 'newGoalTarget'].forEach((id) => {
+        document.getElementById(id).addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            submitNewGoal();
+          }
+        });
       });
 
       document.getElementById('dailyGoalsList').addEventListener('click', (e) => {
@@ -1499,9 +1512,17 @@
             renderDailyGoals();
           }
         } else if (action === 'delete-goal') {
-          dailyGoals = dailyGoals.filter((g) => g.id !== goalId);
-          saveStorage();
-          renderDailyGoals();
+          const goal = dailyGoals.find((g) => g.id === goalId);
+          openConfirm(
+            'Remove daily goal?',
+            `Remove "${goal ? goal.name : 'this goal'}" from your Daily Bodyweight Goals?`,
+            () => {
+              dailyGoals = dailyGoals.filter((g) => g.id !== goalId);
+              saveStorage();
+              renderDailyGoals();
+              showToast('Daily goal removed');
+            }
+          );
         }
       });
 
