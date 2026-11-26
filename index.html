@@ -161,6 +161,8 @@
             <button data-template="pull" type="button" class="template-btn rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300">Pull</button>
             <button data-template="legs" type="button" class="template-btn rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300">Legs</button>
             <button data-template="upper" type="button" class="template-btn rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300">Upper</button>
+            <button data-template="fullbody" type="button" class="template-btn rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300">Full Body</button>
+            <button data-template="arms" type="button" class="template-btn rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300">Arms</button>
           </div>
         </div>
 
@@ -496,7 +498,7 @@
           const rawGoals = localStorage.getItem(DAILY_GOALS_KEY);
           if (rawGoals) {
             const parsedGoals = JSON.parse(rawGoals);
-            if (Array.isArray(parsedGoals) && parsedGoals.length > 0) dailyGoals = parsedGoals;
+            if (Array.isArray(parsedGoals)) dailyGoals = parsedGoals;
           }
           const rawLogs = localStorage.getItem(DAILY_LOGS_KEY);
           if (rawLogs) {
@@ -576,7 +578,9 @@
           push: { title: 'Push Day', muscle: 'Chest' },
           pull: { title: 'Pull Day', muscle: 'Back' },
           legs: { title: 'Leg Day', muscle: 'Legs' },
-          upper: { title: 'Upper Body', muscle: 'Chest' }
+          upper: { title: 'Upper Body', muscle: 'Chest' },
+          fullbody: { title: 'Full Body', muscle: 'Full Body' },
+          arms: { title: 'Arms Day', muscle: 'Arms' }
         };
         const chosen = splitNames[key];
         if (!chosen) return;
@@ -1380,6 +1384,16 @@
         document.getElementById('dailyGoalsDateBadge').textContent = today;
         const container = document.getElementById('dailyGoalsList');
 
+        if (dailyGoals.length === 0) {
+          container.innerHTML = `
+            <div class="sm:col-span-2 rounded-xl border border-dashed border-slate-800 bg-slate-950/50 px-4 py-3 text-center text-xs text-slate-400">
+              No daily bodyweight goals active. Tap <span class="font-semibold text-slate-200">+ Add Goal</span> above anytime if you want to track daily reps.
+            </div>
+          `;
+          if (window.lucide) window.lucide.createIcons();
+          return;
+        }
+
         container.innerHTML = dailyGoals
           .map((goal) => {
             const { quickReps, workoutReps, total } = getGoalRepsForToday(goal);
@@ -1406,11 +1420,7 @@
                         ? `<button type="button" data-goal-action="reset-today" data-goal-id="${goal.id}" title="Reset quick-logged reps for today" class="rounded-lg p-1 text-slate-500 transition hover:bg-slate-800 hover:text-slate-200"><i data-lucide="rotate-ccw" class="h-3.5 w-3.5"></i></button>`
                         : ''
                     }
-                    ${
-                      dailyGoals.length > 1
-                        ? `<button type="button" data-goal-action="delete-goal" data-goal-id="${goal.id}" title="Remove goal" class="rounded-lg p-1 text-slate-500 transition hover:bg-rose-500/15 hover:text-rose-400"><i data-lucide="x" class="h-3.5 w-3.5"></i></button>`
-                        : ''
-                    }
+                    <button type="button" data-goal-action="delete-goal" data-goal-id="${goal.id}" title="Remove goal" class="rounded-lg p-1 text-slate-500 transition hover:bg-rose-500/15 hover:text-rose-400"><i data-lucide="x" class="h-3.5 w-3.5"></i></button>
                   </div>
                 </div>
 
