@@ -1648,11 +1648,13 @@
           .map((c) => {
             const label = c.metric === 'distance' ? 'Distance' : 'Time';
             const suffix = c.metric === 'distance' ? (c.unit || distUnit) : 'min';
+            const stamp = c.timestamp ? `${c.date} · ${c.timestamp}` : c.date;
             return `
               <div class="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs">
-                <div class="flex items-center gap-2">
+                <div class="flex flex-wrap items-center gap-2">
                   <span class="rounded-md bg-sky-500/15 px-2 py-0.5 font-semibold text-sky-300">${label}</span>
                   <span class="font-bold text-white tabular-nums">${escapeHtml(c.value)} ${escapeHtml(suffix)}</span>
+                  <span class="rounded-md bg-slate-800/80 px-2 py-0.5 text-[11px] font-medium text-slate-400 tabular-nums">${escapeHtml(stamp)}</span>
                 </div>
                 <button type="button" data-cardio-delete="${c.id}" title="Remove cardio entry" class="rounded-lg p-1 text-slate-500 transition hover:bg-rose-500/15 hover:text-rose-400">
                   <i data-lucide="x" class="h-3.5 w-3.5"></i>
@@ -1673,9 +1675,11 @@
           return;
         }
         const distUnit = unit === 'kg' ? 'km' : 'mi';
+        const nowTime = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
         cardioLogs.unshift({
           id: 'cardio_' + uid(),
           date: todayISO(),
+          timestamp: nowTime,
           metric,
           value: val,
           unit: metric === 'distance' ? distUnit : 'min'
