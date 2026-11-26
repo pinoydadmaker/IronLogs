@@ -141,11 +141,13 @@
           </button>
         </div>
 
-        <!-- Add Custom Daily Goal Form (hidden by default) -->
-        <div id="addGoalForm" class="mb-3 hidden flex-col gap-2 rounded-xl border border-slate-800 bg-slate-950/80 p-3 sm:flex-row sm:items-center">
-          <input id="newGoalName" type="text" placeholder="Exercise (e.g., Pull-Ups)" class="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none" />
-          <input id="newGoalTarget" type="number" min="1" step="1" placeholder="Daily target (e.g., 50)" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none sm:w-40" />
-          <button id="saveNewGoalBtn" type="button" class="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 transition hover:bg-emerald-400">Add</button>
+        <!-- Add Custom Daily Goal Drafts (hidden when empty) -->
+        <div id="goalDraftsWrap" class="mb-3 hidden space-y-2 rounded-xl border border-slate-800 bg-slate-950/80 p-3">
+          <div id="goalDraftsList" class="space-y-2"></div>
+          <div class="flex items-center justify-end gap-2 pt-1">
+            <button id="cancelGoalDraftsBtn" type="button" class="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:text-white">Cancel</button>
+            <button id="saveAllGoalDraftsBtn" type="button" class="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 transition hover:bg-emerald-400">Save All</button>
+          </div>
         </div>
 
         <div id="dailyGoalsList" class="grid gap-3 sm:grid-cols-2"></div>
@@ -1448,39 +1450,97 @@
         if (window.lucide) window.lucide.createIcons();
       }
 
-      document.getElementById('toggleAddGoalBtn').addEventListener('click', () => {
-        const form = document.getElementById('addGoalForm');
-        form.classList.toggle('hidden');
-        form.classList.toggle('flex');
-      });
+      let goalDrafts = [];
 
-      function submitNewGoal() {
-        const nameEl = document.getElementById('newGoalName');
-        const targetEl = document.getElementById('newGoalTarget');
-        const name = nameEl.value.trim();
-        const target = Math.max(1, parseInt(targetEl.value, 10) || 100);
-        if (!name) {
-          showToast('Enter an exercise name for the daily goal.', true);
+      function renderGoalDrafts() {
+        const wrap = document.getElementById('goalDraftsWrap');
+        const list = document.getElementById('goalDraftsList');
+        if (goalDrafts.length === 0) {
+          wrap.classList.add('hidden');
+          list.innerHTML = '';
           return;
         }
-        dailyGoals.push({ id: 'goal_' + uid(), name, target });
-        saveStorage();
-        nameEl.value = '';
-        targetEl.value = '';
-        document.getElementById('addGoalForm').classList.add('hidden');
-        document.getElementById('addGoalForm').classList.remove('flex');
-        renderDailyGoals();
-        showToast(`Added daily goal: ${name} (${target}/day)`);
+        wrap.classList.remove('hidden');
+        list.innerHTML = goalDrafts
+          .map(
+            (d) => `
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-center" data-draft-id="${d.id}">
+                <input type="text" placeholder="Exercise (e.g., Pull-Ups)" value="${escapeHtml(d.name)}" data-draft-field="name"
+                  class="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none" />
+                <div class="flex items-center gap-2">
+                  <input type="number" min="1" step="1" placeholder="Target (100)" value="${escapeHtml(d.target)}" data-draft-field="target"
+                    class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none sm:w-32" />
+                  <button type="button" data-draft-action="save" class="rounded-lg bg-emerald-500/20 px-2.5 py-1.5 text-xs font-bold text-emerald-300 transition hover:bg-emerald-500/30">Save</button>
+                  <button type="button" data-draft-action="remove" title="Remove row" class="rounded-lg p-1.5 text-slate-400 transition hover:bg-rose-500/15 hover:text-rose-400">
+                    <i data-lucide="x" class="h-3.5 w-3.5"></i>
+                  </button>
+                </div>
+              </div>
+            `
+          )
+          .join('');
+        if (window.lucide) window.lucide.createIcons();
       }
 
-      document.getElementById('saveNewGoalBtn').addEventListener('click', submitNewGoal);
-      ['newGoalName', 'newGoalTarget'].forEach((id) => {
-        document.getElementById(id).addEventListener('keydown', (e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            submitNewGoal();
-          }
+      document.getElementById('toggleAddGoalBtn').addEventListener('click', () => {
+        goalDrafts.push({ id: 'draft_' + uid(), name: '', target: '' });
+        renderGoalDrafts();
+      });
+
+      document.getElementById('cancelGoalDraftsBtn').addEventListener('click', () => {
+        goalDrafts = [];
+        renderGoalDrafts();
+      });
+
+      document.getElementById('saveAllGoalDraftsBtn').addEventListener('click', () => {
+        const valid = goalDrafts.filter((d) => d.name.trim().length > 0);
+        if (valid.length === 0) {
+          showToast('Enter at least one exercise name.', true);
+          return;
+        }
+        valid.forEach((d) => {
+          const target = Math.max(1, parseInt(d.target, 10) || 100);
+          dailyGoals.push({ id: 'goal_' + uid(), name: d.name.trim(), target });
         });
+        goalDrafts = [];
+        saveStorage();
+        renderGoalDrafts();
+        renderDailyGoals();
+        showToast(`Added ${valid.length} daily goal${valid.length > 1 ? 's' : ''}`);
+      });
+
+      document.getElementById('goalDraftsList').addEventListener('input', (e) => {
+        const row = e.target.closest('[data-draft-id]');
+        if (!row) return;
+        const draft = goalDrafts.find((d) => d.id === row.dataset.draftId);
+        if (!draft) return;
+        if (e.target.dataset.draftField === 'name') draft.name = e.target.value;
+        if (e.target.dataset.draftField === 'target') draft.target = e.target.value;
+      });
+
+      document.getElementById('goalDraftsList').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-draft-action]');
+        if (!btn) return;
+        const row = btn.closest('[data-draft-id]');
+        if (!row) return;
+        const draftId = row.dataset.draftId;
+        if (btn.dataset.draftAction === 'remove') {
+          goalDrafts = goalDrafts.filter((d) => d.id !== draftId);
+          renderGoalDrafts();
+        } else if (btn.dataset.draftAction === 'save') {
+          const draft = goalDrafts.find((d) => d.id === draftId);
+          if (!draft || !draft.name.trim()) {
+            showToast('Enter an exercise name for the daily goal.', true);
+            return;
+          }
+          const target = Math.max(1, parseInt(draft.target, 10) || 100);
+          dailyGoals.push({ id: 'goal_' + uid(), name: draft.name.trim(), target });
+          goalDrafts = goalDrafts.filter((d) => d.id !== draftId);
+          saveStorage();
+          renderGoalDrafts();
+          renderDailyGoals();
+          showToast(`Added daily goal: ${draft.name.trim()} (${target}/day)`);
+        }
       });
 
       document.getElementById('dailyGoalsList').addEventListener('click', (e) => {
