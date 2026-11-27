@@ -3,13 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="no-referrer" />
   <title>IronLog — Workout &amp; Volume Tracker</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.17" referrerpolicy="no-referrer"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <style>
     body {
       font-family: 'Inter', system-ui, -apple-system, sans-serif;
@@ -390,6 +391,16 @@
       const DAILY_GOALS_KEY = 'ironlog_daily_goals_v1';
       const DAILY_LOGS_KEY = 'ironlog_daily_logs_v1';
       const CARDIO_KEY = 'ironlog_cardio_v1';
+
+      // Security & capacity limits
+      const MAX_IMPORT_BYTES = 5 * 1024 * 1024; // 5 MB
+      const MAX_WORKOUTS = 5000;
+      const MAX_GOALS = 100;
+      const MAX_CARDIO = 5000;
+      const MAX_EXERCISES_PER_WORKOUT = 100;
+      const MAX_SETS_PER_EXERCISE = 100;
+      const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
       const MUSCLE_GROUPS = ['Chest', 'Back', 'Legs', 'Shoulders', 'Arms', 'Core', 'Full Body'];
       const BW_KEYWORDS = ['push-up', 'pushup', 'push up', 'pull-up', 'pullup', 'pull up', 'chin-up', 'chinup', 'chin up', 'bodyweight squat', 'air squat', 'dip', 'leg raise', 'burpee', 'sit-up', 'situp', 'crunch'];
       const DEFAULT_DAILY_GOALS = [
@@ -401,7 +412,7 @@
       let unit = 'lbs';
       let workouts = [];
       let dailyGoals = [...DEFAULT_DAILY_GOALS];
-      let dailyLogs = {};
+      let dailyLogs = Object.create(null);
       let cardioLogs = [];
       let activeTab = 'log';
       let sessionExercises = [];
@@ -411,6 +422,9 @@
 
       // Helpers
       function uid() {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+          return crypto.randomUUID();
+        }
         return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
       }
 
@@ -438,6 +452,188 @@
           .replace(/>/g, '&gt;')
           .replace(/"/g, '&quot;')
           .replace(/'/g, '&#39;');
+      }
+
+      // Strict Input & JSON Sanitizers
+      function sanitizeId(val, prefix = '') {
+        if (typeof val === 'string') {
+          const cleaned = val.trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+          if (cleaned && !FORBIDDEN_KEYS.has(cleaned)) {
+            return cleaned;
+          }
+        }
+        return prefix + uid();
+      }
+
+      function sanitizeText(val, maxLen = 120) {
+        if (val === null || val === undefined) return '';
+        return String(val)
+          .replace(/[\u0000-\u001F\u007F]/g, '')
+          .trim()
+          .slice(0, maxLen);
+      }
+
+      function sanitizeDate(val) {
+        if (typeof val === 'string') {
+          const trimmed = val.trim();
+          if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+            const [y, m, d] = trimmed.split('-').map(Number);
+            const dt = new Date(Date.UTC(y, m - 1, d));
+            if (
+              dt.getUTCFullYear() === y &&
+              dt.getUTCMonth() === m - 1 &&
+              dt.getUTCDate() === d
+            ) {
+              return trimmed;
+            }
+          }
+        }
+        return todayISO();
+      }
+
+      function sanitizeUnit(val, allowed = ['lbs', 'kg'], fallback = 'lbs') {
+        return typeof val === 'string' && allowed.includes(val) ? val : fallback;
+      }
+
+      function sanitizeNumber(val, { min = 0, max = 1e9, integer = false, fallback = 0 } = {}) {
+        const num = typeof val === 'number' ? val : Number(val);
+        if (!Number.isFinite(num)) return fallback;
+        const clamped = Math.min(max, Math.max(min, num));
+        return integer ? Math.round(clamped) : clamped;
+      }
+
+      function sanitizeWorkouts(raw) {
+        if (!Array.isArray(raw)) return [];
+        const result = [];
+        const limit = Math.min(raw.length, MAX_WORKOUTS);
+        for (let i = 0; i < limit; i++) {
+          const item = raw[i];
+          if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+          if (!Array.isArray(item.exercises)) continue;
+
+          const exercises = [];
+          const exLimit = Math.min(item.exercises.length, MAX_EXERCISES_PER_WORKOUT);
+          for (let j = 0; j < exLimit; j++) {
+            const ex = item.exercises[j];
+            if (!ex || typeof ex !== 'object' || Array.isArray(ex)) continue;
+            const name = sanitizeText(ex.name, 100);
+            if (!name || !Array.isArray(ex.sets)) continue;
+
+            const muscle = MUSCLE_GROUPS.includes(ex.muscle) ? ex.muscle : 'Full Body';
+            const isBodyweight = Boolean(ex.isBodyweight);
+            const sets = [];
+            const setLimit = Math.min(ex.sets.length, MAX_SETS_PER_EXERCISE);
+            for (let k = 0; k < setLimit; k++) {
+              const s = ex.sets[k];
+              if (!s || typeof s !== 'object' || Array.isArray(s)) continue;
+              const weight = isBodyweight ? 0 : sanitizeNumber(s.weight, { min: 0, max: 100000 });
+              const reps = sanitizeNumber(s.reps, { min: 0, max: 100000, integer: true });
+              if (reps > 0 || (!isBodyweight && weight > 0)) {
+                sets.push({ weight, reps });
+              }
+            }
+
+            if (sets.length > 0) {
+              exercises.push({ name, muscle, isBodyweight, sets });
+            }
+          }
+
+          if (exercises.length === 0) continue;
+
+          const stats = calcWorkoutStats(exercises);
+          result.push({
+            id: sanitizeId(item.id),
+            title: sanitizeText(item.title, 120) || `${exercises[0].muscle} Session`,
+            date: sanitizeDate(item.date),
+            notes: sanitizeText(item.notes, 500),
+            unit: sanitizeUnit(item.unit, ['lbs', 'kg'], unit),
+            totalVolume: stats.volume,
+            totalSets: stats.sets,
+            totalReps: stats.reps,
+            exercises,
+            createdAt: sanitizeNumber(item.createdAt, { min: 0, max: 8.64e15, integer: true, fallback: Date.now() })
+          });
+        }
+        return result;
+      }
+
+      function sanitizeDailyGoals(raw) {
+        if (!Array.isArray(raw)) return [...DEFAULT_DAILY_GOALS];
+        const result = [];
+        const seenIds = new Set();
+        const limit = Math.min(raw.length, MAX_GOALS);
+        for (let i = 0; i < limit; i++) {
+          const g = raw[i];
+          if (!g || typeof g !== 'object' || Array.isArray(g)) continue;
+          const name = sanitizeText(g.name, 80);
+          if (!name) continue;
+          let id = sanitizeId(g.id, 'goal_');
+          if (seenIds.has(id)) id = 'goal_' + uid();
+          seenIds.add(id);
+          const target = sanitizeNumber(g.target, { min: 1, max: 100000, integer: true, fallback: 100 });
+          result.push({ id, name, target });
+        }
+        return result;
+      }
+
+      function sanitizeDailyLogs(raw) {
+        const cleanLogs = Object.create(null);
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return cleanLogs;
+
+        const dateEntries = Object.entries(raw);
+        const maxDates = Math.min(dateEntries.length, 3650);
+        for (let i = 0; i < maxDates; i++) {
+          const [dateKey, dayMap] = dateEntries[i];
+          if (FORBIDDEN_KEYS.has(dateKey) || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) continue;
+          if (sanitizeDate(dateKey) !== dateKey) continue;
+          if (!dayMap || typeof dayMap !== 'object' || Array.isArray(dayMap)) continue;
+
+          const cleanDay = Object.create(null);
+          const goalEntries = Object.entries(dayMap);
+          const maxGoalEntries = Math.min(goalEntries.length, MAX_GOALS * 2);
+          let hasAny = false;
+          for (let j = 0; j < maxGoalEntries; j++) {
+            const [goalKey, repVal] = goalEntries[j];
+            if (FORBIDDEN_KEYS.has(goalKey) || !/^[a-zA-Z0-9_-]{1,64}$/.test(goalKey)) continue;
+            const reps = sanitizeNumber(repVal, { min: 0, max: 100000, integer: true });
+            if (reps > 0) {
+              cleanDay[goalKey] = reps;
+              hasAny = true;
+            }
+          }
+          if (hasAny) {
+            cleanLogs[dateKey] = cleanDay;
+          }
+        }
+        return cleanLogs;
+      }
+
+      function sanitizeCardioLogs(raw) {
+        if (!Array.isArray(raw)) return [];
+        const result = [];
+        const limit = Math.min(raw.length, MAX_CARDIO);
+        const defaultDistUnit = unit === 'kg' ? 'km' : 'mi';
+        for (let i = 0; i < limit; i++) {
+          const c = raw[i];
+          if (!c || typeof c !== 'object' || Array.isArray(c)) continue;
+          const metric = c.metric === 'distance' || c.metric === 'time' ? c.metric : null;
+          if (!metric) continue;
+          const value = sanitizeNumber(c.value, { min: 0, max: 100000 });
+          if (value <= 0) continue;
+          const entryUnit =
+            metric === 'distance'
+              ? sanitizeUnit(c.unit, ['mi', 'km'], defaultDistUnit)
+              : 'min';
+          result.push({
+            id: sanitizeId(c.id, 'cardio_'),
+            date: sanitizeDate(c.date),
+            timestamp: sanitizeText(c.timestamp, 32),
+            metric,
+            value,
+            unit: entryUnit
+          });
+        }
+        return result;
       }
 
       function isBodyweightName(name) {
@@ -517,30 +713,26 @@
       // Persistence
       function loadStorage() {
         try {
-          const savedUnit = localStorage.getItem(UNIT_KEY);
-          if (savedUnit === 'lbs' || savedUnit === 'kg') unit = savedUnit;
+          unit = sanitizeUnit(localStorage.getItem(UNIT_KEY), ['lbs', 'kg'], 'lbs');
+
           const raw = localStorage.getItem(STORAGE_KEY);
           if (raw) {
-            const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed)) workouts = parsed;
+            workouts = sanitizeWorkouts(JSON.parse(raw));
           }
           const rawGoals = localStorage.getItem(DAILY_GOALS_KEY);
           if (rawGoals) {
-            const parsedGoals = JSON.parse(rawGoals);
-            if (Array.isArray(parsedGoals)) dailyGoals = parsedGoals;
+            dailyGoals = sanitizeDailyGoals(JSON.parse(rawGoals));
           }
           const rawLogs = localStorage.getItem(DAILY_LOGS_KEY);
           if (rawLogs) {
-            const parsedLogs = JSON.parse(rawLogs);
-            if (parsedLogs && typeof parsedLogs === 'object') dailyLogs = parsedLogs;
+            dailyLogs = sanitizeDailyLogs(JSON.parse(rawLogs));
           }
           const rawCardio = localStorage.getItem(CARDIO_KEY);
           if (rawCardio) {
-            const parsedCardio = JSON.parse(rawCardio);
-            if (Array.isArray(parsedCardio)) cardioLogs = parsedCardio;
+            cardioLogs = sanitizeCardioLogs(JSON.parse(rawCardio));
           }
         } catch (e) {
-          // Ignore storage restrictions
+          // Ignore storage restrictions or corrupt entries
         }
       }
 
@@ -552,7 +744,7 @@
           localStorage.setItem(DAILY_LOGS_KEY, JSON.stringify(dailyLogs));
           localStorage.setItem(CARDIO_KEY, JSON.stringify(cardioLogs));
         } catch (e) {
-          // Ignore storage restrictions
+          showToast('Warning: Could not save data to local storage. Storage may be full or restricted.', true);
         }
       }
 
@@ -639,21 +831,24 @@
 
       function renderSession() {
         const container = document.getElementById('exerciseList');
+        const safeUnit = escapeHtml(unit);
         container.innerHTML = sessionExercises
           .map((ex, exIdx) => {
+            const safeExId = escapeHtml(ex.id);
             const exStats = calcExerciseStats(ex);
             const muscleOptions = MUSCLE_GROUPS.map(
-              (m) => `<option value="${m}" ${ex.muscle === m ? 'selected' : ''}>${m}</option>`
+              (m) => `<option value="${escapeHtml(m)}" ${ex.muscle === m ? 'selected' : ''}>${escapeHtml(m)}</option>`
             ).join('');
 
             const isBw = Boolean(ex.isBodyweight);
             const setsRows = ex.sets
               .map((s, setIdx) => {
+                const safeSetId = escapeHtml(s.id);
                 const vol = calcSetVolume(s, isBw);
                 return `
                   <div class="grid grid-cols-12 items-center gap-2 rounded-xl border ${
                     s.done ? 'border-emerald-500/35 bg-emerald-500/5' : 'border-slate-800/80 bg-slate-950/70'
-                  } px-2.5 py-2" data-ex-id="${ex.id}" data-set-id="${s.id}">
+                  } px-2.5 py-2" data-ex-id="${safeExId}" data-set-id="${safeSetId}">
                     <div class="col-span-2 flex items-center gap-1.5 sm:col-span-1">
                       <span class="text-xs font-bold text-slate-400 tabular-nums">#${setIdx + 1}</span>
                     </div>
@@ -673,7 +868,7 @@
                     </div>
                     <div class="col-span-2 text-right sm:col-span-3">
                       <span class="set-vol text-xs font-semibold ${isBw ? 'text-amber-300' : 'text-emerald-300'} tabular-nums sm:text-sm">${formatNumber(vol)}</span>
-                      <span class="hidden text-[11px] text-slate-500 sm:inline"> ${isBw ? 'reps' : unit}</span>
+                      <span class="hidden text-[11px] text-slate-500 sm:inline"> ${isBw ? 'reps' : safeUnit}</span>
                     </div>
                     <div class="col-span-2 flex items-center justify-end gap-1 sm:col-span-2">
                       <button type="button" data-action="toggle-set" title="Mark set complete"
@@ -695,19 +890,19 @@
               .join('');
 
             return `
-              <div class="rounded-2xl border border-slate-800 bg-slate-900/75 p-4 shadow-sm sm:p-5" data-ex-card="${ex.id}">
+              <div class="rounded-2xl border border-slate-800 bg-slate-900/75 p-4 shadow-sm sm:p-5" data-ex-card="${safeExId}">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div class="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center">
                     <span class="hidden h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-xs font-bold text-slate-300 sm:inline-flex">${exIdx + 1}</span>
                     <input type="text" list="exerciseSuggestions" placeholder="Exercise name (e.g., Bench Press or Pull-Ups)" value="${escapeHtml(ex.name)}"
-                      data-ex-id="${ex.id}" data-action="edit-ex-name"
+                      data-ex-id="${safeExId}" data-action="edit-ex-name"
                       class="w-full rounded-xl border border-slate-700/80 bg-slate-950 px-3.5 py-2 text-sm font-semibold text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none sm:flex-1" />
                     <div class="flex items-center gap-2">
-                      <select data-ex-id="${ex.id}" data-action="edit-ex-muscle"
+                      <select data-ex-id="${safeExId}" data-action="edit-ex-muscle"
                         class="flex-1 rounded-xl border border-slate-700/80 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 focus:border-emerald-500 focus:outline-none sm:w-32">
                         ${muscleOptions}
                       </select>
-                      <button type="button" data-ex-id="${ex.id}" data-action="toggle-bw" title="Toggle Bodyweight (reps only)"
+                      <button type="button" data-ex-id="${safeExId}" data-action="toggle-bw" title="Toggle Bodyweight (reps only)"
                         class="rounded-xl border px-2.5 py-2 text-xs font-bold transition ${
                           isBw
                             ? 'border-amber-500/50 bg-amber-500/15 text-amber-300'
@@ -722,10 +917,10 @@
                     <div class="text-left sm:text-right">
                       <span class="text-[11px] uppercase tracking-wider text-slate-400">${isBw ? 'Total Reps' : 'Ex Volume'}</span>
                       <p class="ex-vol text-sm font-bold ${isBw ? 'text-amber-300' : 'text-emerald-400'} tabular-nums">${
-                        isBw ? `${formatNumber(exStats.reps)} reps` : `${formatNumber(exStats.volume)} ${unit}`
+                        isBw ? `${formatNumber(exStats.reps)} reps` : `${formatNumber(exStats.volume)} ${safeUnit}`
                       }</p>
                     </div>
-                    <button type="button" data-ex-id="${ex.id}" data-action="remove-ex" title="Remove exercise"
+                    <button type="button" data-ex-id="${safeExId}" data-action="remove-ex" title="Remove exercise"
                       class="rounded-xl border border-slate-800 bg-slate-950 p-2 text-slate-400 transition hover:border-rose-500/40 hover:text-rose-400">
                       <i data-lucide="trash-2" class="h-4 w-4"></i>
                     </button>
@@ -735,7 +930,7 @@
                 <!-- Column Headers -->
                 <div class="mt-4 mb-1.5 grid grid-cols-12 gap-2 px-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                   <div class="col-span-2 sm:col-span-1">Set</div>
-                  <div class="col-span-3 sm:col-span-3">${isBw ? 'Mode' : `Weight (${unit})`}</div>
+                  <div class="col-span-3 sm:col-span-3">${isBw ? 'Mode' : `Weight (${safeUnit})`}</div>
                   <div class="col-span-3 sm:col-span-3">Reps</div>
                   <div class="col-span-2 text-right sm:col-span-3">${isBw ? 'Reps' : 'Volume'}</div>
                   <div class="col-span-2 text-right sm:col-span-2">Done</div>
@@ -744,12 +939,12 @@
                 <div class="space-y-2">${setsRows}</div>
 
                 <div class="mt-3 flex items-center justify-between">
-                  <button type="button" data-ex-id="${ex.id}" data-action="add-set"
+                  <button type="button" data-ex-id="${safeExId}" data-action="add-set"
                     class="inline-flex items-center gap-1.5 rounded-lg bg-slate-800/90 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-slate-700 hover:text-white">
                     <i data-lucide="plus" class="h-3.5 w-3.5"></i>
                     <span>Add Set</span>
                   </button>
-                  <span class="text-xs text-slate-500 tabular-nums">${exStats.sets} working sets · ${exStats.reps} reps</span>
+                  <span class="text-xs text-slate-500 tabular-nums">${formatNumber(exStats.sets)} working sets · ${formatNumber(exStats.reps)} reps</span>
                 </div>
               </div>
             `;
@@ -762,23 +957,23 @@
 
       // Save Workout
       function saveWorkout() {
-        const titleInput = document.getElementById('workoutTitle').value.trim();
-        const dateInput = document.getElementById('workoutDate').value || todayISO();
-        const notesInput = document.getElementById('workoutNotes').value.trim();
+        const titleInput = sanitizeText(document.getElementById('workoutTitle').value, 120);
+        const dateInput = sanitizeDate(document.getElementById('workoutDate').value);
+        const notesInput = sanitizeText(document.getElementById('workoutNotes').value, 500);
 
         const cleanedExercises = sessionExercises
           .map((ex) => {
             const isBw = Boolean(ex.isBodyweight);
             const validSets = ex.sets
               .map((s) => ({
-                weight: isBw ? 0 : Math.max(0, parseFloat(s.weight) || 0),
-                reps: Math.max(0, parseInt(s.reps, 10) || 0)
+                weight: isBw ? 0 : sanitizeNumber(s.weight, { min: 0, max: 100000 }),
+                reps: sanitizeNumber(s.reps, { min: 0, max: 100000, integer: true })
               }))
               .filter((s) => s.reps > 0 || (!isBw && s.weight > 0));
 
             return {
-              name: ex.name.trim(),
-              muscle: ex.muscle,
+              name: sanitizeText(ex.name, 100),
+              muscle: MUSCLE_GROUPS.includes(ex.muscle) ? ex.muscle : 'Full Body',
               isBodyweight: isBw,
               sets: validSets
             };
@@ -796,7 +991,7 @@
           title: titleInput || `${cleanedExercises[0].muscle} Session`,
           date: dateInput,
           notes: notesInput,
-          unit,
+          unit: sanitizeUnit(unit, ['lbs', 'kg'], 'lbs'),
           totalVolume: stats.volume,
           totalSets: stats.sets,
           totalReps: stats.reps,
@@ -805,6 +1000,7 @@
         };
 
         workouts.unshift(workout);
+        if (workouts.length > MAX_WORKOUTS) workouts = workouts.slice(0, MAX_WORKOUTS);
         workouts.sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt || 0) - (a.createdAt || 0));
         saveStorage();
         updateHistoryBadge();
@@ -854,6 +1050,8 @@
 
         list.innerHTML = filtered
           .map((w) => {
+            const safeWorkoutId = escapeHtml(w.id);
+            const safeWorkoutUnit = escapeHtml(w.unit || unit);
             const muscles = [...new Set(w.exercises.map((e) => e.muscle))];
             const exBreakdown = w.exercises
               .map((ex) => {
@@ -870,7 +1068,7 @@
                       <p class="mt-0.5 text-slate-400 tabular-nums">${escapeHtml(setsSummary)}</p>
                     </div>
                     <span class="font-bold ${isBw ? 'text-amber-300' : 'text-emerald-400'} tabular-nums">${
-                      isBw ? `${formatNumber(exReps)} reps` : `${formatNumber(exVol)} ${w.unit || unit}`
+                      isBw ? `${formatNumber(exReps)} reps` : `${formatNumber(exVol)} ${safeWorkoutUnit}`
                     }</span>
                   </div>
                 `;
@@ -878,7 +1076,7 @@
               .join('');
 
             return `
-              <article class="rounded-2xl border border-slate-800 bg-slate-900/75 p-4 sm:p-5" data-workout-id="${w.id}">
+              <article class="rounded-2xl border border-slate-800 bg-slate-900/75 p-4 sm:p-5" data-workout-id="${safeWorkoutId}">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div>
                     <div class="flex flex-wrap items-center gap-2">
@@ -896,15 +1094,15 @@
 
                   <div class="flex items-center justify-between gap-4 sm:justify-end">
                     <div class="text-left sm:text-right">
-                      <p class="text-lg font-extrabold text-emerald-400 tabular-nums">${formatNumber(w.totalVolume)} ${w.unit || unit}</p>
-                      <p class="text-xs text-slate-400 tabular-nums">${w.totalSets} sets · ${w.totalReps} reps</p>
+                      <p class="text-lg font-extrabold text-emerald-400 tabular-nums">${formatNumber(w.totalVolume)} ${safeWorkoutUnit}</p>
+                      <p class="text-xs text-slate-400 tabular-nums">${formatNumber(w.totalSets)} sets · ${formatNumber(w.totalReps)} reps</p>
                     </div>
                     <div class="flex items-center gap-1.5">
-                      <button type="button" data-action="repeat-workout" data-id="${w.id}" title="Repeat in Log tab"
+                      <button type="button" data-action="repeat-workout" data-id="${safeWorkoutId}" title="Repeat in Log tab"
                         class="rounded-xl border border-slate-700 bg-slate-800 px-2.5 py-2 text-xs font-semibold text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300">
                         Repeat
                       </button>
-                      <button type="button" data-action="delete-workout" data-id="${w.id}" title="Delete workout"
+                      <button type="button" data-action="delete-workout" data-id="${safeWorkoutId}" title="Delete workout"
                         class="rounded-xl border border-slate-800 bg-slate-950 p-2 text-slate-400 transition hover:border-rose-500/40 hover:text-rose-400">
                         <i data-lucide="trash-2" class="h-4 w-4"></i>
                       </button>
@@ -1077,16 +1275,17 @@
           return;
         }
 
+        const safeUnit = escapeHtml(unit);
         tbody.innerHTML = rows
           .map(
             (r) => `
               <tr class="hover:bg-slate-800/40">
                 <td class="py-2.5 pr-3 font-semibold text-white">${escapeHtml(r.name)}</td>
                 <td class="px-3 py-2.5"><span class="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-300">${escapeHtml(r.muscle)}</span></td>
-                <td class="px-3 py-2.5 text-right text-slate-200">${r.isBodyweight && r.maxWeight === 0 ? '<span class="text-amber-300 font-semibold">BW</span>' : `${formatNumber(r.maxWeight)} ${unit}`}</td>
-                <td class="px-3 py-2.5 text-right text-slate-200">${r.isBodyweight && r.bestSetVol === 0 ? `${formatNumber(r.bestSetReps)} reps` : `${formatNumber(r.bestSetVol)} ${unit}`}</td>
+                <td class="px-3 py-2.5 text-right text-slate-200">${r.isBodyweight && r.maxWeight === 0 ? '<span class="text-amber-300 font-semibold">BW</span>' : `${formatNumber(r.maxWeight)} ${safeUnit}`}</td>
+                <td class="px-3 py-2.5 text-right text-slate-200">${r.isBodyweight && r.bestSetVol === 0 ? `${formatNumber(r.bestSetReps)} reps` : `${formatNumber(r.bestSetVol)} ${safeUnit}`}</td>
                 <td class="px-3 py-2.5 text-right text-slate-300">${formatNumber(r.totalSets)}</td>
-                <td class="py-2.5 pl-3 text-right font-bold ${r.isBodyweight && r.totalVolume === 0 ? 'text-amber-300' : 'text-emerald-400'}">${r.isBodyweight && r.totalVolume === 0 ? `${formatNumber(r.totalReps)} reps` : `${formatNumber(r.totalVolume)} ${unit}`}</td>
+                <td class="py-2.5 pl-3 text-right font-bold ${r.isBodyweight && r.totalVolume === 0 ? 'text-amber-300' : 'text-emerald-400'}">${r.isBodyweight && r.totalVolume === 0 ? `${formatNumber(r.totalReps)} reps` : `${formatNumber(r.totalVolume)} ${safeUnit}`}</td>
               </tr>
             `
           )
@@ -1160,7 +1359,7 @@
           return { ...w, totalVolume: st.volume, totalSets: st.sets, totalReps: st.reps, createdAt: Date.now() };
         });
 
-        workouts = [...samples, ...workouts];
+        workouts = [...samples, ...workouts].slice(0, MAX_WORKOUTS);
         workouts.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
         saveStorage();
         updateHistoryBadge();
@@ -1369,23 +1568,45 @@
       document.getElementById('importInput').addEventListener('change', (e) => {
         const file = e.target.files && e.target.files[0];
         if (!file) return;
+        if (file.size > MAX_IMPORT_BYTES) {
+          showToast('Import failed: File exceeds the 5 MB size limit.', true);
+          e.target.value = '';
+          return;
+        }
         const reader = new FileReader();
         reader.onload = () => {
           try {
             const parsed = JSON.parse(reader.result);
-            const imported = Array.isArray(parsed) ? parsed : parsed.workouts;
-            if (!Array.isArray(imported)) throw new Error('Invalid format');
-            workouts = imported;
-            if (Array.isArray(parsed.dailyGoals)) dailyGoals = parsed.dailyGoals;
-            if (parsed.dailyLogs && typeof parsed.dailyLogs === 'object') dailyLogs = parsed.dailyLogs;
-            if (Array.isArray(parsed.cardioLogs)) cardioLogs = parsed.cardioLogs;
+            const rawWorkouts = Array.isArray(parsed) ? parsed : parsed && parsed.workouts;
+            if (!Array.isArray(rawWorkouts)) throw new Error('Invalid format');
+
+            if (parsed && !Array.isArray(parsed) && typeof parsed === 'object') {
+              if (parsed.unit !== undefined) {
+                unit = sanitizeUnit(parsed.unit, ['lbs', 'kg'], unit);
+              }
+              if (Array.isArray(parsed.dailyGoals)) {
+                dailyGoals = sanitizeDailyGoals(parsed.dailyGoals);
+              }
+              if (parsed.dailyLogs && typeof parsed.dailyLogs === 'object') {
+                dailyLogs = sanitizeDailyLogs(parsed.dailyLogs);
+              }
+              if (Array.isArray(parsed.cardioLogs)) {
+                cardioLogs = sanitizeCardioLogs(parsed.cardioLogs);
+              }
+            }
+
+            workouts = sanitizeWorkouts(rawWorkouts);
+            workouts.sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt || 0) - (a.createdAt || 0));
+
             saveStorage();
+            renderUnitToggle();
             updateHistoryBadge();
             renderDailyGoals();
             renderCardio();
+            renderSession();
             if (activeTab === 'history') renderHistory();
             if (activeTab === 'analytics') renderAnalytics();
-            showToast(`Imported ${imported.length} workouts`);
+            showToast(`Imported ${formatNumber(workouts.length)} workouts`);
           } catch (err) {
             showToast('Could not read JSON file.', true);
           }
@@ -1438,13 +1659,14 @@
 
         container.innerHTML = dailyGoals
           .map((goal) => {
+            const safeGoalId = escapeHtml(goal.id);
             const { quickReps, workoutReps, total } = getGoalRepsForToday(goal);
             const target = Math.max(1, parseInt(goal.target, 10) || 100);
             const pct = Math.min(100, Math.round((total / target) * 100));
             const hit = total >= target;
 
             return `
-              <div class="rounded-xl border ${hit ? 'border-emerald-500/45 bg-emerald-500/5' : 'border-slate-800 bg-slate-950/75'} p-3.5" data-goal-id="${goal.id}">
+              <div class="rounded-xl border ${hit ? 'border-emerald-500/45 bg-emerald-500/5' : 'border-slate-800 bg-slate-950/75'} p-3.5" data-goal-id="${safeGoalId}">
                 <div class="flex items-start justify-between gap-2">
                   <div>
                     <div class="flex items-center gap-2">
@@ -1453,16 +1675,16 @@
                     </div>
                     <p class="mt-0.5 text-xs text-slate-400 tabular-nums">
                       <span class="font-bold ${hit ? 'text-emerald-400' : 'text-slate-200'}">${formatNumber(total)}</span> / ${formatNumber(target)} reps (${pct}%)
-                      ${workoutReps > 0 ? `<span class="text-slate-500"> · ${workoutReps} from workouts</span>` : ''}
+                      ${workoutReps > 0 ? `<span class="text-slate-500"> · ${formatNumber(workoutReps)} from workouts</span>` : ''}
                     </p>
                   </div>
                   <div class="flex items-center gap-1">
                     ${
                       quickReps > 0
-                        ? `<button type="button" data-goal-action="reset-today" data-goal-id="${goal.id}" title="Reset quick-logged reps for today" class="rounded-lg p-1 text-slate-500 transition hover:bg-slate-800 hover:text-slate-200"><i data-lucide="rotate-ccw" class="h-3.5 w-3.5"></i></button>`
+                        ? `<button type="button" data-goal-action="reset-today" data-goal-id="${safeGoalId}" title="Reset quick-logged reps for today" class="rounded-lg p-1 text-slate-500 transition hover:bg-slate-800 hover:text-slate-200"><i data-lucide="rotate-ccw" class="h-3.5 w-3.5"></i></button>`
                         : ''
                     }
-                    <button type="button" data-goal-action="delete-goal" data-goal-id="${goal.id}" title="Remove goal" class="rounded-lg p-1 text-slate-500 transition hover:bg-rose-500/15 hover:text-rose-400"><i data-lucide="x" class="h-3.5 w-3.5"></i></button>
+                    <button type="button" data-goal-action="delete-goal" data-goal-id="${safeGoalId}" title="Remove goal" class="rounded-lg p-1 text-slate-500 transition hover:bg-rose-500/15 hover:text-rose-400"><i data-lucide="x" class="h-3.5 w-3.5"></i></button>
                   </div>
                 </div>
 
@@ -1471,12 +1693,12 @@
                 </div>
 
                 <div class="mt-3 flex flex-wrap items-center gap-1.5">
-                  <button type="button" data-goal-action="add-reps" data-goal-id="${goal.id}" data-reps="10" class="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-semibold text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300">+10</button>
-                  <button type="button" data-goal-action="add-reps" data-goal-id="${goal.id}" data-reps="20" class="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-semibold text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300">+20</button>
-                  <button type="button" data-goal-action="add-reps" data-goal-id="${goal.id}" data-reps="25" class="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-semibold text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300">+25</button>
+                  <button type="button" data-goal-action="add-reps" data-goal-id="${safeGoalId}" data-reps="10" class="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-semibold text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300">+10</button>
+                  <button type="button" data-goal-action="add-reps" data-goal-id="${safeGoalId}" data-reps="20" class="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-semibold text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300">+20</button>
+                  <button type="button" data-goal-action="add-reps" data-goal-id="${safeGoalId}" data-reps="25" class="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-semibold text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300">+25</button>
                   <div class="ml-auto flex items-center gap-1">
-                    <input type="number" min="1" step="1" placeholder="Reps" data-goal-input="${goal.id}" class="w-16 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none tabular-nums" />
-                    <button type="button" data-goal-action="add-custom" data-goal-id="${goal.id}" class="rounded-lg bg-slate-800 px-2.5 py-1 text-xs font-semibold text-emerald-300 transition hover:bg-slate-700">Add</button>
+                    <input type="number" min="1" step="1" placeholder="Reps" data-goal-input="${safeGoalId}" class="w-16 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none tabular-nums" />
+                    <button type="button" data-goal-action="add-custom" data-goal-id="${safeGoalId}" class="rounded-lg bg-slate-800 px-2.5 py-1 text-xs font-semibold text-emerald-300 transition hover:bg-slate-700">Add</button>
                   </div>
                 </div>
               </div>
@@ -1501,7 +1723,7 @@
         list.innerHTML = goalDrafts
           .map(
             (d) => `
-              <div class="flex flex-col gap-2 sm:flex-row sm:items-center" data-draft-id="${d.id}">
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-center" data-draft-id="${escapeHtml(d.id)}">
                 <input type="text" placeholder="Exercise (e.g., Pull-Ups)" value="${escapeHtml(d.name)}" data-draft-field="name"
                   class="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none" />
                 <div class="flex items-center gap-2">
@@ -1520,6 +1742,10 @@
       }
 
       document.getElementById('toggleAddGoalBtn').addEventListener('click', () => {
+        if (dailyGoals.length + goalDrafts.length >= MAX_GOALS) {
+          showToast(`Maximum of ${MAX_GOALS} daily goals reached.`, true);
+          return;
+        }
         goalDrafts.push({ id: 'draft_' + uid(), name: '', target: '' });
         renderGoalDrafts();
       });
@@ -1530,14 +1756,15 @@
       });
 
       document.getElementById('saveAllGoalDraftsBtn').addEventListener('click', () => {
-        const valid = goalDrafts.filter((d) => d.name.trim().length > 0);
+        const valid = goalDrafts.filter((d) => sanitizeText(d.name, 80).length > 0);
         if (valid.length === 0) {
           showToast('Enter at least one exercise name.', true);
           return;
         }
         valid.forEach((d) => {
-          const target = Math.max(1, parseInt(d.target, 10) || 100);
-          dailyGoals.push({ id: 'goal_' + uid(), name: d.name.trim(), target });
+          if (dailyGoals.length >= MAX_GOALS) return;
+          const target = sanitizeNumber(d.target, { min: 1, max: 100000, integer: true, fallback: 100 });
+          dailyGoals.push({ id: 'goal_' + uid(), name: sanitizeText(d.name, 80), target });
         });
         goalDrafts = [];
         saveStorage();
@@ -1566,17 +1793,22 @@
           renderGoalDrafts();
         } else if (btn.dataset.draftAction === 'save') {
           const draft = goalDrafts.find((d) => d.id === draftId);
-          if (!draft || !draft.name.trim()) {
+          const cleanName = draft ? sanitizeText(draft.name, 80) : '';
+          if (!draft || !cleanName) {
             showToast('Enter an exercise name for the daily goal.', true);
             return;
           }
-          const target = Math.max(1, parseInt(draft.target, 10) || 100);
-          dailyGoals.push({ id: 'goal_' + uid(), name: draft.name.trim(), target });
+          if (dailyGoals.length >= MAX_GOALS) {
+            showToast(`Maximum of ${MAX_GOALS} daily goals reached.`, true);
+            return;
+          }
+          const target = sanitizeNumber(draft.target, { min: 1, max: 100000, integer: true, fallback: 100 });
+          dailyGoals.push({ id: 'goal_' + uid(), name: cleanName, target });
           goalDrafts = goalDrafts.filter((d) => d.id !== draftId);
           saveStorage();
           renderGoalDrafts();
           renderDailyGoals();
-          showToast(`Added daily goal: ${draft.name.trim()} (${target}/day)`);
+          showToast(`Added daily goal: ${cleanName} (${formatNumber(target)}/day)`);
         }
       });
 
@@ -1587,17 +1819,21 @@
         const goalId = btn.dataset.goalId;
         const today = todayISO();
 
+        if (!goalId || FORBIDDEN_KEYS.has(goalId)) return;
+
         if (action === 'add-reps') {
-          const reps = parseInt(btn.dataset.reps, 10) || 0;
-          if (!dailyLogs[today]) dailyLogs[today] = {};
+          const reps = sanitizeNumber(btn.dataset.reps, { min: 0, max: 100000, integer: true });
+          if (reps <= 0) return;
+          if (!dailyLogs[today]) dailyLogs[today] = Object.create(null);
           dailyLogs[today][goalId] = (dailyLogs[today][goalId] || 0) + reps;
           saveStorage();
           renderDailyGoals();
         } else if (action === 'add-custom') {
-          const input = document.querySelector(`[data-goal-input="${goalId}"]`);
-          const reps = parseInt(input && input.value, 10) || 0;
+          const goalCard = btn.closest('[data-goal-id]');
+          const input = goalCard && goalCard.querySelector('[data-goal-input]');
+          const reps = sanitizeNumber(input && input.value, { min: 0, max: 100000, integer: true });
           if (reps <= 0) return;
-          if (!dailyLogs[today]) dailyLogs[today] = {};
+          if (!dailyLogs[today]) dailyLogs[today] = Object.create(null);
           dailyLogs[today][goalId] = (dailyLogs[today][goalId] || 0) + reps;
           input.value = '';
           saveStorage();
@@ -1652,11 +1888,11 @@
             return `
               <div class="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs">
                 <div class="flex flex-wrap items-center gap-2">
-                  <span class="rounded-md bg-sky-500/15 px-2 py-0.5 font-semibold text-sky-300">${label}</span>
+                  <span class="rounded-md bg-sky-500/15 px-2 py-0.5 font-semibold text-sky-300">${escapeHtml(label)}</span>
                   <span class="font-bold text-white tabular-nums">${escapeHtml(c.value)} ${escapeHtml(suffix)}</span>
                   <span class="rounded-md bg-slate-800/80 px-2 py-0.5 text-[11px] font-medium text-slate-400 tabular-nums">${escapeHtml(stamp)}</span>
                 </div>
-                <button type="button" data-cardio-delete="${c.id}" title="Remove cardio entry" class="rounded-lg p-1 text-slate-500 transition hover:bg-rose-500/15 hover:text-rose-400">
+                <button type="button" data-cardio-delete="${escapeHtml(c.id)}" title="Remove cardio entry" class="rounded-lg p-1 text-slate-500 transition hover:bg-rose-500/15 hover:text-rose-400">
                   <i data-lucide="x" class="h-3.5 w-3.5"></i>
                 </button>
               </div>
@@ -1667,10 +1903,10 @@
       }
 
       function submitCardio() {
-        const metric = document.getElementById('cardioMetric').value;
+        const metric = document.getElementById('cardioMetric').value === 'time' ? 'time' : 'distance';
         const valEl = document.getElementById('cardioValue');
-        const val = parseFloat(valEl.value);
-        if (isNaN(val) || val <= 0) {
+        const val = sanitizeNumber(valEl.value, { min: 0, max: 100000 });
+        if (val <= 0) {
           showToast('Enter a cardio distance or time value.', true);
           return;
         }
@@ -1684,6 +1920,7 @@
           value: val,
           unit: metric === 'distance' ? distUnit : 'min'
         });
+        if (cardioLogs.length > MAX_CARDIO) cardioLogs = cardioLogs.slice(0, MAX_CARDIO);
         valEl.value = '';
         saveStorage();
         renderCardio();
